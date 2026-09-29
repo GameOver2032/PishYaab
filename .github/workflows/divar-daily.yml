@@ -33,6 +33,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: TEMP dump district filters
+        run: python3 scripts/dump_districts.py
+
       - name: Run watcher
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

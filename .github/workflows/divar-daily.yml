@@ -1,0 +1,51 @@
+name: Divar West-Tehran Pre-sale Watch
+
+on:
+  schedule:
+    # 05:30 UTC == 09:00 Asia/Tehran (Iran has used a fixed UTC+3:30 offset,
+    # no DST, since 2022).
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "اگر true باشد، پیام‌ها فقط در لاگ چاپ می‌شوند و به تلگرام ارسال نمی‌شوند"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: divar-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run watcher
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DIVAR_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+        run: python3 scripts/divar_watch.py
+
+      - name: Commit updated state
+        run: |
+          if ! git diff --quiet -- data/seen.json; then
+            git config user.name "pishyaab-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add data/seen.json
+            git commit -m "chore: update seen listings state [skip ci]"
+            git push
+          else
+            echo "no state changes"
+          fi

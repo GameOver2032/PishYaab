@@ -1,8 +1,6 @@
 name: Divar West-Tehran Pre-sale Watch
 
 on:
-  push:
-    branches: ["arena/01a0ec9d-pishyaab"]
   schedule:
     # 05:30 UTC == 09:00 Asia/Tehran (Iran has used a fixed UTC+3:30 offset,
     # no DST, since 2022).
@@ -37,7 +35,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DIVAR_DRY_RUN: "1"
+          DIVAR_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
         run: python3 scripts/divar_watch.py
 
       - name: Commit updated state

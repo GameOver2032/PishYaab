@@ -33,14 +33,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: TEMP dump district filters
-        run: python3 scripts/dump_districts.py
-
       - name: Run watcher
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DIVAR_DRY_RUN: "1" # TEMP: forced dry-run for pipeline smoke test, will be restored
+          DIVAR_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
         run: python3 scripts/divar_watch.py
 
       - name: Commit updated state

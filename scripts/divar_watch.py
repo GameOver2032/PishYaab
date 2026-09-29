@@ -98,8 +98,13 @@ def _http_post_json(url: str, body: dict, timeout: float = 25.0) -> dict:
     req.add_header("user-agent", USER_AGENT)
     req.add_header("origin", DIVAR_WEB)
     req.add_header("referer", DIVAR_WEB + "/")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        print(f"[debug] divar HTTP {exc.code} body: {detail[:2000]}", file=sys.stderr)
+        raise
 
 
 def build_search_body(

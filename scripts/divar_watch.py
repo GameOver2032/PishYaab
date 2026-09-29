@@ -2,18 +2,32 @@
 """
 PishYaab / Divar watcher
 =========================
-هر روز آگهی‌های «پیش‌فروش» *شخصی* (نه بنگاهی) دیوار را در محله‌های تعیین‌شده
-(پیش‌فرض: منطقه‌های ۵، ۲۱ و ۲۲ تهران) جست‌وجو می‌کند و آگهی‌های تازه را از
-طریق یک ربات تلگرام برای کاربر ارسال می‌کند.
+هر روز آگهی‌های «پیش‌فروش» *شخصی* (نه بنگاهی/مشاوره‌املاکی) دیوار را در
+محله‌های تعیین‌شده (پیش‌فرض: منطقه‌های ۵، ۲۱ و ۲۲ تهران) جست‌وجو می‌کند و
+آگهی‌های تازه را از طریق یک ربات تلگرام برای کاربر ارسال می‌کند.
+
+نکته‌ی مهم درباره‌ی تشخیص «شخصی بودن»
+--------------------------------------
+دیوار در فرم جست‌وجو یک فیلتر به اسم «آگهی‌دهنده: شخصی / مشاور املاک» دارد،
+اما این پروژه با آزمایش مستقیم روی API عمومی دیوار متوجه شد که فرستادن این
+فیلتر در بدنه‌ی درخواست جست‌وجو (`business-type`) هیچ اثری روی نتایج
+دسته‌ی «presell» ندارد؛ فیلتر «شخصی» و فیلتر «مشاور املاک» دقیقاً یک نتیجه
+برمی‌گردانند. پس **اعتماد به آن فیلتر اشتباه است**.
+
+به‌جایش، نوع واقعیِ آگهی‌دهنده از خودِ صفحه‌ی جزئیات هر آگهی خوانده می‌شود:
+هر آگهی یک فیلد ردیابی داخلی دارد (`webengage.business_type`) که همان
+چیزی‌ست که خودِ دیوار برای هر پست ثبت می‌کند؛ مقدار `"personal"` یعنی
+آگهی‌دهنده شخص حقیقی است، و مقادیری مثل `"premium-panel"` یعنی حساب
+تجاری/بنگاهی (پولی) است. این پروژه دقیقاً همین فیلد را — برای هر آگهیِ تازه‌
+دیده‌شده — می‌خواند و فقط `"personal"` را عبور می‌دهد. این یعنی معیار تشخیص
+شخصی/بنگاهی، «نوع حساب آگهی‌دهنده» است، نه محتوای متن آگهی (پس مثلاً یک
+پروژه‌ی بزرگ که توسط خودِ مالک/فرد حقیقی آگهی شده هم قبول می‌شود، و برعکس).
 
 طراحی عمداً ساده و ارزان نگه داشته شده:
   * فقط از کتابخانه استاندارد پایتون استفاده می‌شود (بدون pip install).
   * وضعیتِ «قبلاً دیده‌شده» در یک فایل JSON کنار همین ریپو نگه داشته می‌شود
     (data/seen.json) که در گردش‌کار گیت‌هاب اکشن، بعد از هر اجرا کامیت می‌شود.
   * ارسال پیام از طریق Telegram Bot API (رایگان) انجام می‌شود.
-
-این اسکریپت از endpoint عمومی (غیررسمی ولی مستند و پرکاربرد) دیوار استفاده
-می‌کند: POST https://api.divar.ir/v8/postlist/w/search
 """
 
 from __future__ import annotations
@@ -32,6 +46,7 @@ CONFIG_PATH = ROOT / "config.json"
 SEEN_PATH = ROOT / "data" / "seen.json"
 
 DIVAR_API = "https://api.divar.ir/v8/postlist/w/search"
+DIVAR_POST_API = "https://api.divar.ir/v8/posts-v2/web/{token}"
 DIVAR_WEB = "https://divar.ir"
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -43,6 +58,11 @@ USER_AGENT = (
 PAGINATION_TYPE = "type.googleapis.com/post_list.PaginationData"
 
 MAX_SEEN_TOKENS = 5000  # جلوگیری از رشد بی‌نهایت فایل وضعیت
+
+# مقداری که دیوار برای آگهی‌دهنده‌ی «شخص حقیقی» در فیلد ردیابی
+# webengage.business_type ثبت می‌کند. هر مقدار دیگری (premium-panel,
+# real-estate-business, ...) یعنی حساب تجاری/بنگاهی است.
+PERSONAL_BUSINESS_TYPE_VALUES = {"personal", "person", "none", ""}
 
 
 # --------------------------------------------------------------------------- config
@@ -76,7 +96,6 @@ def load_seen() -> dict:
 
 
 def save_seen(seen: dict) -> None:
-    # اگر تعداد زیاد شد، قدیمی‌ترین‌ها را حذف کن تا فایل بزرگ نشود.
     if len(seen) > MAX_SEEN_TOKENS:
         ordered = sorted(seen.items(), key=lambda kv: kv[1].get("first_seen", 0))
         seen = dict(ordered[-MAX_SEEN_TOKENS:])
@@ -86,7 +105,7 @@ def save_seen(seen: dict) -> None:
         fh.write("\n")
 
 
-# --------------------------------------------------------------------------- divar api
+# --------------------------------------------------------------------------- http
 
 
 def _http_post_json(url: str, body: dict, timeout: float = 25.0) -> dict:
@@ -98,19 +117,25 @@ def _http_post_json(url: str, body: dict, timeout: float = 25.0) -> dict:
     req.add_header("user-agent", USER_AGENT)
     req.add_header("origin", DIVAR_WEB)
     req.add_header("referer", DIVAR_WEB + "/")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        print(f"[debug] divar HTTP {exc.code} body: {detail[:2000]}", file=sys.stderr)
-        raise
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _http_get_json(url: str, timeout: float = 20.0) -> dict:
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("accept", "application/json, text/plain, */*")
+    req.add_header("accept-language", "fa-IR,fa;q=0.9,en;q=0.8")
+    req.add_header("user-agent", USER_AGENT)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+# --------------------------------------------------------------------------- divar search
 
 
 def build_search_body(
     config: dict,
     district_ids: list[str],
-    business_type: str | None,
     page: int,
     page_size: int,
     cursor: dict | None,
@@ -120,8 +145,10 @@ def build_search_body(
     if district_ids:
         data["districts"] = {"repeated_string": {"value": district_ids}}
 
-    if business_type:
-        data["business-type"] = {"str": {"value": business_type}}
+    # توجه: فیلتر «business-type» عمداً اینجا فرستاده نمی‌شود چون آزمایش
+    # مستقیم نشان داد دیوار آن را برای دسته‌ی presell نادیده می‌گیرد.
+    # تشخیص شخصی/بنگاهی بعداً و به‌ازای هر آگهی، از صفحه‌ی جزئیات انجام می‌شود
+    # (نگاه کنید به fetch_business_type).
 
     price_min = config.get("price_min")
     price_max = config.get("price_max")
@@ -153,30 +180,10 @@ def fetch_posts(config: dict, district_ids: list[str]) -> list[dict]:
     """همه‌ی آگهی‌های صفحه‌های اول را برمی‌گرداند (خام، هنوز فیلترنشده)."""
     all_rows: list[dict] = []
     cursor = None
-    business_type = config.get("business_type")
 
     for page in range(1, int(config.get("max_pages", 3)) + 1):
-        body = build_search_body(
-            config, district_ids, business_type, page, int(config.get("page_size", 60)), cursor
-        )
-        try:
-            payload = _http_post_json(DIVAR_API, body)
-        except urllib.error.HTTPError as exc:
-            if business_type and exc.code in (400, 422):
-                # شاید سرور دیوار این فیلتر را برای این دسته نپذیرد؛ دوباره بدون آن تلاش کن
-                # و به‌جایش فیلتر کلیدواژه‌ای (agency_keyword_blocklist) را قوی‌تر اعمال می‌کنیم.
-                print(
-                    f"[warn] divar rejected business-type filter (HTTP {exc.code}); "
-                    "retrying without it",
-                    file=sys.stderr,
-                )
-                business_type = None
-                body = build_search_body(
-                    config, district_ids, None, page, int(config.get("page_size", 60)), cursor
-                )
-                payload = _http_post_json(DIVAR_API, body)
-            else:
-                raise
+        body = build_search_body(config, district_ids, page, int(config.get("page_size", 60)), cursor)
+        payload = _http_post_json(DIVAR_API, body)
 
         rows = [
             w["data"]
@@ -200,7 +207,26 @@ def fetch_posts(config: dict, district_ids: list[str]) -> list[dict]:
     return all_rows
 
 
-def looks_like_agency(config: dict, row: dict, title: str) -> bool:
+def fetch_business_type(token: str) -> str | None:
+    """نوع واقعی آگهی‌دهنده را از صفحه‌ی جزئیات آگهی می‌خواند.
+
+    برمی‌گرداند: "personal" برای شخص حقیقی، یا مقدار دیگری (مثلاً
+    "premium-panel") برای حساب تجاری/بنگاهی، یا None اگر قابل تشخیص نبود.
+    """
+    try:
+        detail = _http_get_json(DIVAR_POST_API.format(token=token))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not fetch detail for {token}: {exc}", file=sys.stderr)
+        return None
+    webengage = detail.get("webengage") or {}
+    business_type = webengage.get("business_type")
+    if business_type is None:
+        return None
+    return str(business_type).strip().lower()
+
+
+def looks_like_agency_text(config: dict, row: dict, title: str) -> bool:
+    """لایه‌ی ایمنی اضافه: اگر متن آگهی خودش را بنگاهی معرفی کند."""
     payload = (row.get("action") or {}).get("payload") or {}
     web_info = payload.get("web_info") or {}
     haystack = " ".join(
@@ -218,7 +244,7 @@ def looks_like_agency(config: dict, row: dict, title: str) -> bool:
     return any(keyword in haystack for keyword in blocklist)
 
 
-def parse_row(config: dict, region_lookup: dict, row: dict) -> dict | None:
+def parse_row(region_lookup: dict, row: dict) -> dict | None:
     payload = (row.get("action") or {}).get("payload") or {}
     web_info = payload.get("web_info") or {}
     token = row.get("token") or payload.get("token")
@@ -226,9 +252,6 @@ def parse_row(config: dict, region_lookup: dict, row: dict) -> dict | None:
         return None
 
     title = (row.get("title") or "").strip()
-    if looks_like_agency(config, row, title):
-        return None
-
     district_persian = web_info.get("district_persian") or ""
     region_name = None
     for district_id, (rname, dname) in region_lookup.items():
@@ -238,6 +261,7 @@ def parse_row(config: dict, region_lookup: dict, row: dict) -> dict | None:
 
     return {
         "token": token,
+        "row": row,
         "title": title,
         "price_text": (row.get("middle_description_text") or "").strip(),
         "district": district_persian,
@@ -303,16 +327,13 @@ def format_listing_message(post: dict) -> str:
         lines.append(f"📍 {escape_html(' - '.join(location_bits))}")
     if post.get("time_text"):
         lines.append(f"🕒 {escape_html(post['time_text'])}")
+    lines.append("👤 آگهی‌دهنده: شخصی")
     lines.append(f"🔗 {post['url']}")
     return "\n".join(lines)
 
 
 def escape_html(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 # --------------------------------------------------------------------------- main
@@ -341,45 +362,81 @@ def main() -> int:
 
     seen = load_seen()
     is_first_run = len(seen) == 0
-
-    fresh_posts: list[dict] = []
     now = int(time.time())
 
+    # همه‌ی ردیف‌ها را پارس کن و ردیف‌های تکراری/بدون توکن را کنار بگذار
+    candidates: list[dict] = []
+    seen_tokens_this_run: set[str] = set()
     for row in raw_rows:
-        post = parse_row(config, region_lookup, row)
+        post = parse_row(region_lookup, row)
         if post is None:
             continue
-        token = post["token"]
-        if token in seen:
+        if post["token"] in seen_tokens_this_run:
             continue
-        seen[token] = {"first_seen": now, "title": post["title"]}
-        fresh_posts.append(post)
+        seen_tokens_this_run.add(post["token"])
+        candidates.append(post)
 
-    save_seen(seen)
+    new_candidates = [c for c in candidates if c["token"] not in seen]
+    print(f"[info] {len(new_candidates)} candidate(s) not seen before")
 
     if is_first_run:
+        # اولین اجراست: فقط وضعیت را با همه‌ی توکن‌های فعلی پر کن، بدون بررسی
+        # نوع آگهی‌دهنده (چون پیامی هم قرار نیست ارسال شود) تا سریع و کم‌هزینه بماند.
+        for post in candidates:
+            seen[post["token"]] = {"first_seen": now, "title": post["title"]}
+        save_seen(seen)
         print(
-            f"[info] اولین اجراست؛ {len(fresh_posts)} آگهی فعلی به عنوان «قبلاً دیده‌شده» "
+            f"[info] اولین اجراست؛ {len(candidates)} آگهی فعلی به عنوان «قبلاً دیده‌شده» "
             "ثبت شدند و پیامی برایشان ارسال نمی‌شود."
         )
-        if not dry_run and fresh_posts:
+        if not dry_run and candidates:
             send_telegram_message(
                 bot_token,
                 chat_id,
                 (
                     "✅ ربات پیش‌یاب فعال شد.\n"
-                    f"در اولین بررسی {len(fresh_posts)} آگهی پیش‌فروش شخصی در محله‌های "
-                    "انتخابی پیدا شد و به‌عنوان «قبلاً دیده‌شده» ثبت شد.\n"
-                    "از این به بعد فقط آگهی‌های تازه براتون ارسال می‌شه."
+                    f"در اولین بررسی {len(candidates)} آگهی پیش‌فروش در محله‌های انتخابی "
+                    "پیدا شد و به‌عنوان «قبلاً دیده‌شده» ثبت شد.\n"
+                    "از این به بعد فقط آگهی‌های تازه‌ی *شخصی* (نه بنگاهی/مشاوره‌املاکی) "
+                    "براتون ارسال می‌شه."
                 ),
             )
         return 0
 
-    print(f"[info] {len(fresh_posts)} new listing(s) found")
+    # از این به بعد: فقط برای آگهی‌های واقعاً تازه، نوع آگهی‌دهنده را از صفحه‌ی
+    # جزئیات می‌خوانیم (چون فیلتر جست‌وجوی دیوار برای این کار قابل‌اعتماد نیست).
+    fresh_personal_posts: list[dict] = []
+    max_checks = int(config.get("max_detail_checks_per_run", 150))
+
+    for post in new_candidates[:max_checks]:
+        business_type = fetch_business_type(post["token"])
+        time.sleep(0.6)  # مؤدبانه با سرور دیوار رفتار کن
+
+        if business_type is None:
+            # اگر نتوانستیم نوع آگهی‌دهنده را تشخیص بدهیم، این‌بار رد می‌شویم
+            # ولی توکن را «دیده‌شده» ثبت نمی‌کنیم تا فردا دوباره امتحان شود.
+            continue
+
+        is_personal = business_type in PERSONAL_BUSINESS_TYPE_VALUES
+        seen[post["token"]] = {
+            "first_seen": now,
+            "title": post["title"],
+            "business_type": business_type,
+        }
+
+        if not is_personal:
+            continue
+        if looks_like_agency_text(config, post["row"], post["title"]):
+            continue
+
+        fresh_personal_posts.append(post)
+
+    save_seen(seen)
+    print(f"[info] {len(fresh_personal_posts)} new PERSONAL listing(s) found")
 
     max_notify = int(config.get("max_notifications_per_run", 40))
-    to_send = fresh_posts[:max_notify]
-    overflow = len(fresh_posts) - len(to_send)
+    to_send = fresh_personal_posts[:max_notify]
+    overflow = len(fresh_personal_posts) - len(to_send)
 
     if dry_run:
         for post in to_send:

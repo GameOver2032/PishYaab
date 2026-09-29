@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
-"""Validate each candidate district id against Divar's real API (one at a time)."""
 import json
-import time
-import urllib.error
+import re
 import urllib.request
-
-CANDIDATES = {
-    "78": "شهرک غرب", "82": "پونک", "145": "جنت‌آباد شمالی", "146": "جنت‌آباد مرکزی",
-    "148": "جنت‌آباد جنوبی", "147": "شاهین", "158": "سازمان برنامه شمالی",
-    "167": "اکباتان", "172": "صادقیه", "171": "طرشت", "139": "مرزداران", "88": "گیشا",
-    "195": "استاد معین", "178": "تهرانسر شرقی", "175": "شهرک استقلال", "170": "فردوس",
-    "173": "اباذر", "169": "شهرک آپادانا", "168": "کوی بیمه", "355": "آریاشهر",
-    "155": "شهر زیبا",
-    "151": "شهران شمالی", "152": "شهران جنوبی", "164": "شهرک آزادی", "374": "وردآورد",
-    "154": "بهاران",
-    "311": "شهرک چیتگر", "306": "چیتگر جنوبی", "188": "دریاچه شهدای خلیج فارس",
-    "161": "دهکده المپیک", "162": "زیبادشت", "165": "گلستان (شهرک راه‌آهن)",
-    "163": "شهرک صدرا",
-}
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -36,37 +20,53 @@ def post_json(url, body):
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
-valid = {}
-invalid = {}
+def get_json(url):
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("accept", "application/json")
+    req.add_header("user-agent", UA)
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
 
-for did, name in CANDIDATES.items():
+
+def search(query):
     body = {
         "city_ids": ["1"],
-        "search_data": {
-            "form_data": {
-                "data": {
-                    "category": {"str": {"value": "presell"}},
-                    "districts": {"repeated_string": {"value": [did]}},
-                }
-            }
-        },
+        "search_data": {"query": query, "form_data": {"data": {}}},
         "pagination_data": {
             "@type": "type.googleapis.com/post_list.PaginationData",
             "page": 1,
-            "page_size": 1,
+            "page_size": 24,
         },
     }
-    try:
-        post_json("https://api.divar.ir/v8/postlist/w/search", body)
-        valid[did] = name
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        invalid[did] = {"name": name, "status": exc.code, "detail": detail[:200]}
-    except Exception as exc:
-        invalid[did] = {"name": name, "error": str(exc)}
-    time.sleep(0.7)
+    payload = post_json("https://api.divar.ir/v8/postlist/w/search", body)
+    return [
+        w["data"] for w in payload.get("list_widgets", []) if w.get("widget_type") == "POST_ROW"
+    ]
 
-print("VALID:")
-print(json.dumps(valid, ensure_ascii=False, indent=2))
-print("INVALID:")
-print(json.dumps(invalid, ensure_ascii=False, indent=2))
+
+rows = search("آریاشهر")
+found = None
+for row in rows:
+    payload = (row.get("action") or {}).get("payload") or {}
+    web_info = payload.get("web_info") or {}
+    district = web_info.get("district_persian") or ""
+    if "آریاشهر" in district:
+        token = row.get("token") or payload.get("token")
+        detail = get_json(f"https://api.divar.ir/v8/posts-v2/web/{token}")
+        crumbs = ((detail.get("seo") or {}).get("bread_crumb")) or []
+        for c in crumbs:
+            ids = (
+                ((c.get("search_data") or {}).get("form_data") or {})
+                .get("data", {})
+                .get("districts", {})
+                .get("repeated_string", {})
+                .get("value")
+            )
+            if ids:
+                found = {"district": district, "token": token, "ids": ids, "crumb_name": c.get("name")}
+        break
+
+print(json.dumps(found, ensure_ascii=False, indent=2))
+print("---all rows districts seen---")
+seen_districts = sorted({((r.get("action") or {}).get("payload") or {}).get("web_info", {}).get("district_persian") for r in rows})
+print(json.dumps(seen_districts, ensure_ascii=False))
